@@ -11,8 +11,8 @@ button:focus { outline: 5px solid #ffdc60; } pre { font: 24px monospace; white-s
 </style>
 </head>
 <body>
-<h1>Read-only Diagnostics</h1>
-<p>Local runtime data only. No firmware changes. Left/Right to choose, Enter to select.</p>
+<h1>Read-only Diagnostics 1.1.0</h1>
+<p>Local runtime data only. No firmware changes. Left/Right to choose, Enter to select. Up/Down to scroll.</p>
 <button id="read">Read report</button><button id="back">Back to TizenBrew</button>
 <pre id="report" aria-live="polite">Press Read report. If the service is still starting, try again.</pre>
 <script>
@@ -41,6 +41,9 @@ button:focus { outline: 5px solid #ffdc60; } pre { font: 24px monospace; white-s
             event.preventDefault();
             selected = 1 - selected;
             buttons[selected].focus();
+        } else if (event.keyCode === 38 || event.keyCode === 40) {
+            event.preventDefault();
+            window.scrollBy(0, event.keyCode === 40 ? 300 : -300);
         } else if (event.keyCode === 13) {
             event.preventDefault();
             document.activeElement.click();

@@ -1,6 +1,6 @@
 {
   "name": "tizenbrew-readonly-diagnostics",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Local read-only runtime diagnostics; no identifiers or firmware access.",
   "packageType": "app",
