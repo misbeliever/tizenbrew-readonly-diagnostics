@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Read-only Diagnostics</title>
+<style>
+body { background: #101820; color: #fff; font: 28px sans-serif; margin: 36px; }
+h1 { font-size: 38px; } button { font: inherit; padding: 12px 24px; margin-right: 24px; }
+button:focus { outline: 5px solid #ffdc60; } pre { font: 24px monospace; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>Read-only Diagnostics</h1>
+<p>Local runtime data only. No firmware changes. Left/Right to choose, Enter to select.</p>
+<button id="read">Read report</button><button id="back">Back to TizenBrew</button>
+<pre id="report" aria-live="polite">Press Read report. If the service is still starting, try again.</pre>
+<script>
+(function () {
+    'use strict';
+    var buttons = [document.getElementById('read'), document.getElementById('back')];
+    var output = document.getElementById('report');
+    var selected = 0;
+    function back() { window.history.back(); }
+    buttons[0].onclick = function () {
+        var xhr = new XMLHttpRequest();
+        output.textContent = 'Reading...';
+        xhr.open('GET', 'http://127.0.0.1:18765/report', true);
+        xhr.timeout = 5000;
+        xhr.onload = function () {
+            output.textContent = xhr.status === 200 ? xhr.responseText : 'Read failed (HTTP ' + xhr.status + ').';
+        };
+        xhr.onerror = xhr.ontimeout = function () {
+            output.textContent = 'Service unavailable. Wait a moment and retry. If it persists, fully exit and reopen TizenBrew.';
+        };
+        xhr.send();
+    };
+    buttons[1].onclick = back;
+    document.addEventListener('keydown', function (event) {
+        if (event.keyCode === 37 || event.keyCode === 39) {
+            event.preventDefault();
+            selected = 1 - selected;
+            buttons[selected].focus();
+        } else if (event.keyCode === 13) {
+            event.preventDefault();
+            document.activeElement.click();
+        } else if (event.keyCode === 10009 || event.keyCode === 27) {
+            event.preventDefault();
+            back();
+        }
+    });
+    buttons[0].focus();
+}());
+</script>
+</body>
+</html>
