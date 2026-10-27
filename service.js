@@ -45,8 +45,67 @@
                 searchableOrExecutable: observe(function () { fs.accessSync(path, fs.X_OK); return true; }) };
         });
     }
+    function boundedText(path, limit) {
+        var fd, buffer = new Buffer(limit + 1), used = 0, n;
+        try {
+            fd = fs.openSync(path, 'r');
+            do { n = fs.readSync(fd, buffer, used, buffer.length - used, null); used += n; }
+            while (n > 0 && used < buffer.length);
+            if (used > limit) { var e = new Error(); e.code = 'E2BIG'; throw e; }
+            return buffer.toString('utf8', 0, used);
+        } finally { if (fd !== undefined) fs.closeSync(fd); }
+    }
+    function permissions(path) {
+        return observe(function () {
+            var st = fs.statSync(path);
+            return { modeOctal: (st.mode & 4095).toString(8), uid: st.uid, gid: st.gid,
+                sizeBytes: st.size, type: st.isDirectory() ? 'directory' : 'file',
+                executableAccess: observe(function () { fs.accessSync(path, fs.X_OK); return true; }) };
+        });
+    }
+    function mountFor(text, target) {
+        var best = null, ambiguous = false;
+        text.split('\n').forEach(function (line) {
+            var parts = line.split(' - '), fields = parts[0].split(' ');
+            if (parts.length !== 2 || fields.length < 6) return;
+            var point = fields[4].replace(/\\([0-7]{3})/g, function (_, code) { return String.fromCharCode(parseInt(code, 8)); });
+            if (point !== '/' && target !== point && target.indexOf(point + '/') !== 0) return;
+            if (best && point.length < best.point.length) return;
+            if (best && point.length === best.point.length) { ambiguous = true; return; }
+            best = { point: point, options: fields[5].split(','), fsType: parts[1].split(' ')[0] };
+            ambiguous = false;
+        });
+        if (!best) return { status: 'unavailable', reason: 'No matching mount record' };
+        // shortcut: stacked mounts are not resolved; report uncertainty rather than infer noexec.
+        if (ambiguous) return { status: 'unavailable', reason: 'Multiple matching mounts at the same path' };
+        return { status: 'observed', mountPoint: best.point.replace(appRoot, '<app>'),
+            fsType: /^[a-zA-Z0-9_.-]{1,40}$/.test(best.fsType) ? best.fsType : 'redacted',
+            options: best.options.filter(function (o) { return /^(ro|rw|nosuid|nodev|noexec|relatime|strictatime|noatime|nodiratime|sync|dirsync|lazytime)$/.test(o); }),
+            noexec: best.options.indexOf('noexec') >= 0 };
+    }
+    function restrictions() {
+        var mounts = observe(function () { return boundedText('/proc/self/mountinfo', 262144); });
+        return {
+            capturedAt: new Date().toISOString(),
+            appDataMount: typeof mounts === 'string' ? mountFor(mounts, appRoot + '/data') : mounts,
+            systemTrueMount: typeof mounts === 'string' ? mountFor(mounts, '/bin/true') : mounts,
+            processStatus: observe(function () {
+                var text = boundedText('/proc/self/status', 32768), result = {};
+                ['NoNewPrivs', 'Seccomp', 'Seccomp_filters', 'CapInh', 'CapPrm', 'CapEff', 'CapBnd', 'CapAmb'].forEach(function (key) {
+                    var match = new RegExp('^' + key + ':\\s*([a-fA-F0-9]+)\\s*$', 'm').exec(text);
+                    result[key] = match ? match[1] : 'not reported';
+                });
+                return result;
+            }),
+            processSecurityLabel: observe(function () {
+                return boundedText('/proc/self/attr/current', 256).replace(/[\x00-\x1f\x7f]/g, '').slice(0, 256);
+            }),
+            dataDirectory: permissions(appRoot + '/data'),
+            systemTrue: permissions('/bin/true')
+        };
+    }
     function collect(done) {
-        report = { diagnosticVersion: '1.2.0', capturedAt: new Date().toISOString(),
+        report = { diagnosticVersion: '1.3.0', capturedAt: new Date().toISOString(),
             node: process.version, v8: process.versions.v8, architecture: process.arch,
             platform: process.platform, osType: os.type(), kernelRelease: os.release(),
             uptimeSeconds: Math.floor(os.uptime()),
@@ -58,7 +117,7 @@
             freeMemoryBytes: os.freemem(), totalMemoryBytes: os.totalmem(),
             tizenPlatform: observe(function () { return tizen.systeminfo.getCapability('http://tizen.org/feature/platform.version'); }),
             systemELF: observe(systemABI), probeELF: elf(binary), probeSHA256: binaryHash,
-            native: nativeResult, executables: {}, paths: {} };
+            restrictions: restrictions(), native: nativeResult, executables: {}, paths: {} };
         ['/', '/bin', '/bin/true', '/bin/uname', '/proc', '/proc/self', '/proc/self/status', '/tmp'].forEach(function (path) {
             report.paths[path] = inspectPath(path);
         });
@@ -66,7 +125,7 @@
             probe('/bin/uname', ['-s', '-r', '-m'], function (r) { report.executables.uname = r; done(); });
         });
     }
-    function runNative(done) {
+    function inspectNative(done) {
         var dir, file, created = false;
         function finish(result) {
             if (created) {
@@ -75,6 +134,7 @@
                     fs.rmdirSync(dir); return 'removed';
                 });
             }
+            result.executionAttempted = false;
             nativeResult = result;
             if (report) report.native = result;
             done();
@@ -103,11 +163,10 @@
             file = dir + '/probe-armv7';
             fs.writeFileSync(file, binary, { flag: 'wx', mode: 448 });
             if (crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex') !== binaryHash) throw new Error('written integrity');
-            probe(file, [], function (r) {
-                r.markerMatched = r.status === 'ok' && r.stdout === 'TIZEN_DIAG_ARMV7_OK\n' && r.stderr === '';
-                if (r.status === 'ok' && !r.markerMatched) r.status = 'failed';
-                finish(r);
-            });
+            finish({ status: 'inspected', executionAttempted: false,
+                capturedAt: new Date().toISOString(),
+                directory: permissions(dir), file: permissions(file),
+                fileMount: observe(function () { return mountFor(boundedText('/proc/self/mountinfo', 262144), file); }) });
         } catch (e) { finish({ status: 'failed', error: errorCode(e) }); }
     }
     function send(res, code, body, cors) {
@@ -163,13 +222,13 @@
         function done() { busy = false; localState(res); }
         try {
             if (match[1] === 'baseline') collect(done);
-            else if (match[1] === 'native') runNative(done);
+            else if (match[1] === 'native') inspectNative(done);
             else if (match[1] === 'share') startLAN(done);
             else { stopLAN(); done(); }
         } catch (e) { busy = false; send(res, 500, { error: errorCode(e) }, true); }
     });
     server.timeout = 5000;
-    server.on('error', function () { console.error('Diagnostics 1.2 loopback listener unavailable'); });
+    server.on('error', function () { console.error('Diagnostics 1.3 loopback listener unavailable'); });
     server.listen(port, '127.0.0.1');
     setTimeout(function () { expired = true; stopLAN(); server.close(); }, 600000);
 }());
