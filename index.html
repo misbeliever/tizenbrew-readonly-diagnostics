@@ -1,59 +1,60 @@
 <!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Read-only Diagnostics</title>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Read-only Diagnostics 1.2</title>
 <style>
-body { background: #101820; color: #fff; font: 28px sans-serif; margin: 36px; }
-h1 { font-size: 38px; } button { font: inherit; padding: 12px 24px; margin-right: 24px; }
-button:focus { outline: 5px solid #ffdc60; } pre { font: 24px monospace; white-space: pre-wrap; }
-</style>
-</head>
-<body>
-<h1>Read-only Diagnostics 1.1.0</h1>
-<p>Local runtime data only. No firmware changes. Left/Right to choose, Enter to select. Up/Down to scroll.</p>
-<button id="read">Read report</button><button id="back">Back to TizenBrew</button>
-<pre id="report" aria-live="polite">Press Read report. If the service is still starting, try again.</pre>
+* { box-sizing: border-box; } html, body { width:100%; height:100%; overflow:hidden; }
+body { margin:0; padding:4vh 4vw; background:#101820; color:#fff; font:3vh sans-serif; }
+h1 { font-size:4.5vh; margin:0 0 1.5vh; } p { margin:1.5vh 0; }
+button { font:inherit; padding:1.5vh 1vw; margin:0 0.7vw 1.5vh 0; background:#263d50; color:white; border:2px solid #a5bbcb; }
+button:focus { outline:0.5vh solid #ffdc60; }
+#summary { background:#1c2c39; padding:2vh; height:24vh; white-space:pre-line; line-height:1.4; }
+#url { display:block; font:2.6vh monospace; overflow-wrap:break-word; word-wrap:break-word; color:#ffdc60; min-height:9vh; }
+#status { height:6vh; } .hint { font-size:2.5vh; color:#b8cbd8; }
+</style></head><body>
+<h1>Read-only Diagnostics 1.2.0</h1>
+<p>Left/Right selects · Enter runs · Return goes back</p>
+<div><button id="baseline">1. Read baseline</button><button id="native">2. Test ARM probe</button><button id="share">3. Share to Mac</button><button id="stop">Stop sharing</button><button id="back">Back</button></div>
+<div id="summary" aria-live="polite">Connecting to diagnostic service…</div>
+<p id="status" aria-live="polite"></p>
+<code id="url"></code>
+<p class="hint">ARM test briefly creates one executable in app-private data, then removes it.<br>LAN sharing: trusted home network only; plain HTTP; secret URL expires after 5 minutes.<br>Service expires 10 minutes after launch. No root or firmware changes.</p>
 <script>
 (function () {
     'use strict';
-    var buttons = [document.getElementById('read'), document.getElementById('back')];
-    var output = document.getElementById('report');
-    var selected = 0;
-    function back() { window.history.back(); }
-    buttons[0].onclick = function () {
+    var ids = ['baseline', 'native', 'share', 'stop', 'back'], buttons = [], selected = 0, key = '', pending = false;
+    var summary = document.getElementById('summary'), status = document.getElementById('status'), url = document.getElementById('url');
+    function show(s) {
+        key = s.control;
+        var r = s.report;
+        summary.textContent = r ? 'Node ' + r.node + ' · ' + r.architecture + ' · ' + r.platform + ' ' + r.kernelRelease + '\nUID ' + r.uid + ' / GID ' + r.gid + ' · ELF EABI ' + (r.systemELF.eabi || '?') + '\nSystem true: ' + r.executables.true.status + ' · uname: ' + r.executables.uname.status + '\nApp-storage probe: ' + r.native.status + (r.native.markerMatched ? ' · marker verified' : '') + (r.native.error ? ' · ' + r.native.error : '') + (r.native.cleanup && r.native.cleanup.error ? ' · cleanup failed (see report)' : '') : 'Ready. Select 1. Read baseline first.';
+        status.textContent = 'LAN: ' + s.lanState;
+        url.textContent = s.lanURL || 'Full report URL appears here when sharing is enabled.';
+    }
+    function request(action) {
+        if (pending) return;
+        if (action && !key) { status.textContent = 'Connecting; retry in a moment.'; return; }
+        pending = true; status.textContent = 'Working…';
         var xhr = new XMLHttpRequest();
-        output.textContent = 'Reading...';
-        xhr.open('GET', 'http://127.0.0.1:18765/report', true);
-        xhr.timeout = 5000;
-        xhr.onload = function () {
-            output.textContent = xhr.status === 200 ? xhr.responseText : 'Read failed (HTTP ' + xhr.status + ').';
+        xhr.open(action ? 'POST' : 'GET', 'http://127.0.0.1:18766/' + (action ? action + '?key=' + key : 'state'), true);
+        xhr.timeout = 8000;
+        xhr.onload = function () { pending = false;
+            try { if (xhr.status !== 200) throw new Error(); show(JSON.parse(xhr.responseText)); }
+            catch (e) { status.textContent = 'Request failed (' + xhr.status + '). Retry shortly.'; }
         };
-        xhr.onerror = xhr.ontimeout = function () {
-            output.textContent = 'Service unavailable. Wait a moment and retry. If it persists, fully exit and reopen TizenBrew.';
-        };
+        xhr.onerror = xhr.ontimeout = function () { pending = false; status.textContent = 'Service unavailable or expired. Restart TV normally, then reopen module.'; };
         xhr.send();
-    };
-    buttons[1].onclick = back;
-    document.addEventListener('keydown', function (event) {
-        if (event.keyCode === 37 || event.keyCode === 39) {
-            event.preventDefault();
-            selected = 1 - selected;
-            buttons[selected].focus();
-        } else if (event.keyCode === 38 || event.keyCode === 40) {
-            event.preventDefault();
-            window.scrollBy(0, event.keyCode === 40 ? 300 : -300);
-        } else if (event.keyCode === 13) {
-            event.preventDefault();
-            document.activeElement.click();
-        } else if (event.keyCode === 10009 || event.keyCode === 27) {
-            event.preventDefault();
-            back();
-        }
+    }
+    function back() { window.history.back(); }
+    ids.forEach(function (id) { var b = document.getElementById(id); buttons.push(b);
+        b.onfocus = function () { selected = buttons.indexOf(b); };
+        b.onclick = id === 'back' ? back : function () { request(id); };
     });
-    buttons[0].focus();
+    document.addEventListener('keydown', function (e) {
+        if (e.keyCode >= 37 && e.keyCode <= 40) {
+            e.preventDefault(); selected = (selected + (e.keyCode === 37 || e.keyCode === 38 ? buttons.length - 1 : 1)) % buttons.length; buttons[selected].focus();
+        } else if (e.keyCode === 13) { e.preventDefault(); buttons[selected].click(); }
+        else if (e.keyCode === 10009 || e.keyCode === 27) { e.preventDefault(); back(); }
+    });
+    buttons[0].focus(); request();
 }());
-</script>
-</body>
-</html>
+</script></body></html>

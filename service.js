@@ -1,116 +1,175 @@
-/* ES5 for the older Tizen Node runtime. No shell, file writes or remote requests. */
+/* ES5 / Node 4.4.3. Fixed diagnostics only; never invoke a shell. */
 (function () {
     'use strict';
-    var http = require('http');
-    var os = require('os');
-    var fs = require('fs');
-    var childProcess = require('child_process');
-    var busy = false;
-    function observe(fn) {
-        try { return fn(); } catch (error) { return { error: error.code || 'unavailable' }; }
+    var http = require('http'), os = require('os'), fs = require('fs');
+    var cp = require('child_process'), crypto = require('crypto');
+    var origin = 'http://127.0.0.1:8081', port = 18766;
+    var control = crypto.randomBytes(16).toString('hex');
+    var report = null, busy = false, lan = null, lanURL = '', lanState = 'off';
+    var nativeResult = { status: 'not run' }, sockets = [], expired = false;
+    var appRoot = '/opt/usr/home/owner/apps_rw/xvvl3S1bvH';
+    var binary = new Buffer('f0VMRgEBAQAAAAAAAAAAAAIAKAABAAAAtAACADQAAABcAQAAAAIABTQAIAAEACgABQAEAAYAAAA0AAAANAABADQAAQCAAAAAgAAAAAQAAAAEAAAAAQAAAAAAAAAAAAEAAAABALQAAAC0AAAABAAAAAAAAQABAAAAtAAAALQAAgC0AAIAPAAAADwAAAAFAAAAAAABAFHldGQAAAAAAAAAAAAAAAAAAAAAAAAAAQYAAAAAAAAAAQCg4xwQj+IUIKDjBHCg4wAAAO8UAFDjAQCgEwAAoAMBcKDjAAAA71RJWkVOX0RJQUdfQVJNVjdfT0sKQS4AAABhZWFiaQABJAAAAAVjb3J0ZXgtYTkABgoHQQgBCQIKAwwBIgEkASoBRAFMaW5rZXI6IExMRCAxOC4xLjYAAC50ZXh0AC5BUk0uYXR0cmlidXRlcwAuY29tbWVudAAuc2hzdHJ0YWIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAABAAAABgAAALQAAgC0AAAAPAAAAAAAAAAAAAAABAAAAAAAAAAHAAAAAwAAcAAAAAAAAAAA8AAAAC8AAAAAAAAAAAAAAAEAAAAAAAAAFwAAAAEAAAAwAAAAAAAAAB8BAAATAAAAAAAAAAAAAAABAAAAAQAAACAAAAADAAAAAAAAAAAAAAAyAQAAKgAAAAAAAAAAAAAAAQAAAAAAAAA=', 'base64');
+    var binaryHash = 'ab157ae418f5e929f4657403de5ed3c5acfa46f7410b9d1d1c0dddf96e6bde9a';
+    function errorCode(e) { return String(e.code || e.name || 'unavailable').slice(0, 60); }
+    function observe(fn) { try { return fn(); } catch (e) { return { error: errorCode(e) }; } }
+    function elf(b) {
+        return { elf: b.length >= 52 && b.toString('hex', 0, 4) === '7f454c46',
+            bits: b[4] === 1 ? 32 : 64, littleEndian: b[5] === 1,
+            machine: b.length >= 52 ? b.readUInt16LE(18) : 0,
+            eabi: b.length >= 52 ? b.readUInt32LE(36) >>> 24 : 0,
+            flagsHex: b.length >= 52 ? '0x' + b.readUInt32LE(36).toString(16) : 'unavailable' };
+    }
+    function systemABI() {
+        var fd, b = new Buffer(52);
+        try { fd = fs.openSync('/bin/true', 'r');
+            if (fs.readSync(fd, b, 0, 52, 0) !== 52) throw new Error('short ELF');
+            return elf(b);
+        } finally { if (fd !== undefined) fs.closeSync(fd); }
+    }
+    function probe(path, args, done) {
+        try {
+            fs.accessSync(path, fs.X_OK);
+            cp.execFile(path, args, { timeout: 1000, killSignal: 'SIGKILL', maxBuffer: 4096,
+                encoding: 'utf8', env: { LANG: 'C', LC_ALL: 'C' } }, function (e, out, err) {
+                done({ status: e ? 'failed' : 'ok', code: e ? e.code : 0,
+                    signal: e ? e.signal || null : null, killed: !!(e && e.killed),
+                    stdout: String(out || '').slice(0, 4096), stderr: String(err || '').slice(0, 4096) });
+            });
+        } catch (e) { done({ status: 'failed', error: errorCode(e) }); }
     }
     function inspectPath(path) {
         return observe(function () {
             var stat = fs.statSync(path);
-            var result = { type: stat.isDirectory() ? 'directory' : 'file' };
-            result.readable = observe(function () { fs.accessSync(path, fs.R_OK); return true; });
-            result.searchableOrExecutable = observe(function () { fs.accessSync(path, fs.X_OK); return true; });
-            return result;
+            return { type: stat.isDirectory() ? 'directory' : 'file',
+                readable: observe(function () { fs.accessSync(path, fs.R_OK); return true; }),
+                searchableOrExecutable: observe(function () { fs.accessSync(path, fs.X_OK); return true; }) };
         });
     }
-    function probe(path, args, done) {
-        try {
-            fs.statSync(path);
-            fs.accessSync(path, fs.X_OK);
-        } catch (error) {
-            return done({ status: 'skipped', error: error.code || 'unavailable' });
-        }
-        try {
-            childProcess.execFile(path, args, {
-                timeout: 1000, killSignal: 'SIGKILL', maxBuffer: 4096,
-                encoding: 'utf8', env: { LANG: 'C', LC_ALL: 'C' }
-            }, function (error, stdout, stderr) {
-                done({ status: error ? 'failed' : 'ok',
-                    code: error ? error.code : 0,
-                    signal: error ? error.signal || null : null,
-                    killed: !!(error && error.killed),
-                    stdout: String(stdout || '').slice(0, 4096),
-                    stderr: String(stderr || '').slice(0, 4096) });
-            });
-        } catch (error) {
-            done({ status: 'failed', error: error.code || 'unavailable' });
-        }
+    function collect(done) {
+        report = { diagnosticVersion: '1.2.0', capturedAt: new Date().toISOString(),
+            node: process.version, v8: process.versions.v8, architecture: process.arch,
+            platform: process.platform, osType: os.type(), kernelRelease: os.release(),
+            uptimeSeconds: Math.floor(os.uptime()),
+            expectedAppWorkingDirectory: process.cwd() === appRoot + '/res/wgt',
+            uid: observe(function () { return process.getuid(); }),
+            gid: observe(function () { return process.getgid(); }),
+            effectiveUid: observe(function () { return process.geteuid(); }),
+            effectiveGid: observe(function () { return process.getegid(); }),
+            freeMemoryBytes: os.freemem(), totalMemoryBytes: os.totalmem(),
+            tizenPlatform: observe(function () { return tizen.systeminfo.getCapability('http://tizen.org/feature/platform.version'); }),
+            systemELF: observe(systemABI), probeELF: elf(binary), probeSHA256: binaryHash,
+            native: nativeResult, executables: {}, paths: {} };
+        ['/', '/bin', '/bin/true', '/bin/uname', '/proc', '/proc/self', '/proc/self/status', '/tmp'].forEach(function (path) {
+            report.paths[path] = inspectPath(path);
+        });
+        probe('/bin/true', [], function (r) { report.executables.true = r;
+            probe('/bin/uname', ['-s', '-r', '-m'], function (r) { report.executables.uname = r; done(); });
+        });
     }
-    function capability() {
-        try {
-            return tizen.systeminfo.getCapability('http://tizen.org/feature/platform.version');
-        } catch (error) {
-            return 'unavailable';
-        }
-    }
-    var server = http.createServer(function (req, res) {
-        if (req.method !== 'GET' || req.url !== '/report') {
-            res.writeHead(404);
-            return res.end();
-        }
-        if (req.headers.origin && req.headers.origin !== 'http://127.0.0.1:8081') {
-            res.writeHead(403);
-            return res.end();
-        }
-        if (busy) {
-            res.writeHead(429);
-            return res.end('Diagnostic already running.');
-        }
-        busy = true;
-        try {
-            var report = {
-                diagnosticVersion: '1.1.0',
-                node: process.version,
-                v8: process.versions.v8,
-                architecture: process.arch,
-                platform: process.platform,
-                tizenPlatform: capability(),
-                osType: os.type(),
-                kernelRelease: os.release(),
-                uptimeSeconds: Math.floor(os.uptime()),
-                totalMemoryBytes: os.totalmem(),
-                freeMemoryBytes: os.freemem(),
-                uid: observe(function () { return process.getuid(); }),
-                gid: observe(function () { return process.getgid(); }),
-                effectiveUid: observe(function () { return process.geteuid(); }),
-                effectiveGid: observe(function () { return process.getegid(); }),
-                cwd: observe(function () { return process.cwd(); }),
-                paths: {},
-                executables: {}
-
-            };
-            ['/', '/bin', '/bin/true', '/bin/uname', '/proc', '/proc/self',
-                '/proc/self/status', '/tmp'].forEach(function (path) {
-                report.paths[path] = inspectPath(path);
-            });
-            // No directory listings or file contents: only fixed-path metadata/access checks.
-            probe('/bin/true', [], function (result) {
-                report.executables['/bin/true'] = result;
-                probe('/bin/uname', ['-s', '-r', '-m'], function (result) {
-                    report.executables['/bin/uname'] = result;
-                    busy = false;
-                    res.writeHead(200, {
-                'Content-Type': 'application/json; charset=utf-8',
-                'Access-Control-Allow-Origin': 'http://127.0.0.1:8081',
-                'Cache-Control': 'no-store'
-            });
-                    res.end(JSON.stringify(report, null, 2));
+    function runNative(done) {
+        var dir, file, created = false;
+        function finish(result) {
+            if (created) {
+                result.cleanup = observe(function () {
+                    try { fs.unlinkSync(file); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+                    fs.rmdirSync(dir); return 'removed';
                 });
-            });
-        } catch (error) {
-            busy = false;
-            res.writeHead(500);
-            res.end('Diagnostic read failed.');
+            }
+            nativeResult = result;
+            if (report) report.native = result;
+            done();
         }
+        try {
+            if (process.platform !== 'linux' || process.arch !== 'arm') {
+                return finish({ status: 'skipped', reason: 'Not ARM Linux' });
+            }
+            var abi = systemABI();
+            if (!abi.elf ||
+                abi.bits !== 32 || !abi.littleEndian || abi.machine !== 40 || abi.eabi !== 5) {
+                return finish({ status: 'skipped', reason: 'ARM Linux EABI5 guard did not match' });
+            }
+            if (crypto.createHash('sha256').update(binary).digest('hex') !== binaryHash) throw new Error('probe integrity');
+            // shortcut: verified 2.0.5 package layout only; reassess if app/package layout changes.
+            if (process.cwd() !== appRoot + '/res/wgt' || fs.realpathSync(appRoot + '/data') !== appRoot + '/data') {
+                return finish({ status: 'skipped', reason: 'Expected app-private data layout not verified' });
+            }
+            var stat = fs.statSync(appRoot + '/data');
+            if (!stat.isDirectory() || stat.uid !== process.getuid()) {
+                return finish({ status: 'skipped', reason: 'Data directory ownership did not match' });
+            }
+            fs.accessSync(appRoot + '/data', fs.W_OK | fs.X_OK);
+            dir = appRoot + '/data/readonly-diag-' + crypto.randomBytes(8).toString('hex');
+            fs.mkdirSync(dir, 448); created = true;
+            file = dir + '/probe-armv7';
+            fs.writeFileSync(file, binary, { flag: 'wx', mode: 448 });
+            if (crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex') !== binaryHash) throw new Error('written integrity');
+            probe(file, [], function (r) {
+                r.markerMatched = r.status === 'ok' && r.stdout === 'TIZEN_DIAG_ARMV7_OK\n' && r.stderr === '';
+                if (r.status === 'ok' && !r.markerMatched) r.status = 'failed';
+                finish(r);
+            });
+        } catch (e) { finish({ status: 'failed', error: errorCode(e) }); }
+    }
+    function send(res, code, body, cors) {
+        var headers = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store',
+            'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Connection': 'close' };
+        if (cors) headers['Access-Control-Allow-Origin'] = origin;
+        res.writeHead(code, headers); res.end(JSON.stringify(body));
+    }
+    function stopLAN() {
+        if (lan) lan.close(); lan = null; lanURL = ''; lanState = 'off';
+        sockets.forEach(function (s) { s.destroy(); }); sockets = [];
+    }
+    function startLAN(done) {
+        if (lan) return done();
+        var addresses = [], interfaces = os.networkInterfaces();
+        Object.keys(interfaces).forEach(function (name) { interfaces[name].forEach(function (a) {
+            if (!a.internal && a.family === 'IPv4' && /^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)/.test(a.address)) addresses.push(a.address);
+        }); });
+        if (!addresses.length) { lanState = 'No private IPv4 address found'; return done(); }
+        var address = addresses[0], token = crypto.randomBytes(16).toString('hex');
+        var endpoint = '/report/' + token, instance = http.createServer(function (req, res) {
+            if (req.method !== 'GET' || req.url !== endpoint || req.headers.host !== address + ':18767' || req.headers.origin) {
+                return send(res, 403, { error: 'Denied' });
+            }
+            send(res, report ? 200 : 503, report || { error: 'Run baseline first' });
+        });
+        lan = instance;
+        instance.timeout = 3000;
+        instance.on('connection', function (s) { sockets.push(s); s.on('close', function () {
+            var i = sockets.indexOf(s); if (i >= 0) sockets.splice(i, 1);
+        }); });
+        instance.once('error', function () { stopLAN(); lanState = 'LAN bind failed'; done(); });
+        instance.listen(18767, address, function () {
+            if (expired) { stopLAN(); return done(); }
+            lanURL = 'http://' + address + ':18767' + endpoint;
+            lanState = 'On for 5 minutes (trusted LAN only)';
+            setTimeout(function () { if (lan === instance) stopLAN(); }, 300000);
+            done();
+        });
+    }
+    function localState(res) { send(res, 200, { report: report, control: control, lanURL: lanURL, lanState: lanState }, true); }
+    var server = http.createServer(function (req, res) {
+        if (expired || req.headers.host !== '127.0.0.1:' + port || (req.headers.origin && req.headers.origin !== origin)) {
+            return send(res, 403, { error: 'Denied' });
+        }
+        if (req.method === 'GET' && req.url === '/state') return localState(res);
+        var match = /^\/(baseline|native|share|stop)\?key=([a-f0-9]{32})$/.exec(req.url);
+        if (req.method !== 'POST' || req.headers.origin !== origin || !match || match[2] !== control) {
+            return send(res, 403, { error: 'Denied' });
+        }
+        if (busy) return send(res, 429, { error: 'Busy; retry shortly' }, true);
+        busy = true;
+        function done() { busy = false; localState(res); }
+        try {
+            if (match[1] === 'baseline') collect(done);
+            else if (match[1] === 'native') runNative(done);
+            else if (match[1] === 'share') startLAN(done);
+            else { stopLAN(); done(); }
+        } catch (e) { busy = false; send(res, 500, { error: errorCode(e) }, true); }
     });
-    server.on('error', function () {
-        console.error('Read-only Diagnostics: loopback listener unavailable; no retry.');
-    });
-    server.listen(18765, '127.0.0.1');
-    setTimeout(function () { server.close(); }, 10 * 60 * 1000);
+    server.timeout = 5000;
+    server.on('error', function () { console.error('Diagnostics 1.2 loopback listener unavailable'); });
+    server.listen(port, '127.0.0.1');
+    setTimeout(function () { expired = true; stopLAN(); server.close(); }, 600000);
 }());
