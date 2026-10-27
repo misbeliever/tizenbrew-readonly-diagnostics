@@ -1,8 +1,8 @@
 {
   "name": "tizenbrew-readonly-diagnostics",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "private": true,
-  "description": "Read-only runtime/security diagnostics, optional file-label inspection, and expiring LAN reports.",
+  "description": "Read-only diagnostics with reviewed display-only chsmack label comparison and expiring LAN reports.",
   "packageType": "app",
   "appName": "Read-only Diagnostics",
   "appPath": "index.html",

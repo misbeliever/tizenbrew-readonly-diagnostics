@@ -105,12 +105,14 @@
         };
     }
     function attributeReader() {
-        var candidates = ['/usr/bin/getfattr', '/bin/getfattr'], checks = [], selected = null;
+        var candidates = ['/usr/bin/chsmack'], checks = [], selected = null;
         candidates.forEach(function (path) {
             var check = observe(function () {
                 var st = fs.statSync(path);
                 if (!st.isFile() || st.uid !== 0 || (st.mode & 18) !== 0) return 'rejected ownership/type/mode';
                 fs.accessSync(path, fs.X_OK);
+                if (st.size !== 12588 || crypto.createHash('sha256').update(fs.readFileSync(path)).digest('hex') !==
+                    'c3e8b56ae2c74d4bf424e68e8dee982e52abd018d62a9800d828043fc302453a') return 'reviewed reader hash/size mismatch';
                 if (!selected) selected = path;
                 return 'available';
             });
@@ -119,42 +121,44 @@
         return { status: selected ? 'available' : 'unavailable', selected: selected, checks: checks };
     }
     function fileAttributes(reader, target, done) {
-        if (!reader.selected) return done({ status: 'unavailable', reason: 'No permitted installed getfattr reader' });
-        var names = ['security.SMACK64', 'security.SMACK64EXEC', 'security.SMACK64MMAP', 'security.ima', 'security.evm'];
-        var result = { reader: reader.selected, attributes: {} }, index = 0;
-        function next() {
-            if (index === names.length) return done(result);
-            var name = names[index++];
-            try {
-                cp.execFile(reader.selected, ['--absolute-names', '--only-values', '-n', name, '--', target], {
-                    timeout: 1000, killSignal: 'SIGKILL', maxBuffer: 4096,
-                    encoding: 'binary', env: { LANG: 'C', LC_ALL: 'C' }
-                }, function (e, stdout) {
-                    if (e) {
-                        result.attributes[name] = { status: 'unavailable', code: e.code === undefined ? null : e.code,
-                            signal: e.signal || null, killed: !!e.killed };
-                    } else {
-                        var value = new Buffer(stdout || '', 'binary');
-                        if (name.indexOf('security.SMACK') === 0) {
-                            var text = value.toString('utf8');
-                            result.attributes[name] = value.length <= 256 && /^[\x20-\x7e]*$/.test(text) ?
-                                { status: 'read', value: text } : { status: 'unavailable', reason: 'Unexpected label encoding/length' };
-                        } else {
-                            result.attributes[name] = { status: 'read', bytes: value.length,
-                                sha256: crypto.createHash('sha256').update(value).digest('hex') };
-                        }
-                    }
-                    next();
-                });
-            } catch (e) {
-                result.attributes[name] = { status: 'unavailable', error: errorCode(e) };
-                next();
-            }
-        }
-        next();
+        if (!reader.selected) return done({ status: 'unavailable', reason: 'Reviewed installed chsmack unavailable' });
+        function unavailable(e) { done({ status: 'unavailable', code: e.code === undefined ? null : e.code,
+            signal: e.signal || null, killed: !!e.killed }); }
+        try {
+            // No setter, remover, recursion or dereference options: default display mode only.
+            cp.execFile(reader.selected, ['--', target], {
+                timeout: 1000, killSignal: 'SIGKILL', maxBuffer: 4096,
+                encoding: 'utf8', env: { LANG: 'C', LC_ALL: 'C' }
+            }, function (e, stdout, stderr) {
+                if (e) return unavailable(e);
+                var text = String(stdout || ''), result = { status: 'unavailable', reader: reader.selected,
+                    stderrPresent: !!stderr, attributes: {} };
+                var fields = { access: 'security.SMACK64', execute: 'security.SMACK64EXEC',
+                    mmap: 'security.SMACK64MMAP', transmute: 'security.SMACK64TRANSMUTE' };
+                Object.keys(fields).forEach(function (field) { result.attributes[fields[field]] = { status: 'not printed' }; });
+                if (text === target + ': No smack property found\n') {
+                    result.status = 'no readable labels printed';
+                    return done(result);
+                }
+                if (text.slice(0, target.length) !== target || text.slice(-1) !== '\n') {
+                    result.attributes = {}; result.reason = 'Unexpected display output'; return done(result);
+                }
+                var rest = text.slice(target.length, -1), count = 0, match;
+                var pattern = /^ (access|execute|mmap|transmute)="([\x20-\x21\x23-\x7e]{1,256})"/;
+                while ((match = pattern.exec(rest))) {
+                    if (result.attributes[fields[match[1]]].status === 'read') break;
+                    result.attributes[fields[match[1]]] = { status: 'read', value: match[2] };
+                    count++; rest = rest.slice(match[0].length);
+                }
+                if (rest || !count) {
+                    result.attributes = {}; result.reason = 'Unexpected display output';
+                } else result.status = 'read';
+                done(result);
+            });
+        } catch (e) { unavailable(e); }
     }
     function collect(done) {
-        report = { diagnosticVersion: '1.4.0', capturedAt: new Date().toISOString(),
+        report = { diagnosticVersion: '1.5.0', capturedAt: new Date().toISOString(),
             node: process.version, v8: process.versions.v8, architecture: process.arch,
             platform: process.platform, osType: os.type(), kernelRelease: os.release(),
             uptimeSeconds: Math.floor(os.uptime()),
@@ -167,7 +171,7 @@
             tizenPlatform: observe(function () { return tizen.systeminfo.getCapability('http://tizen.org/feature/platform.version'); }),
             systemELF: observe(systemABI), probeELF: elf(binary), probeSHA256: binaryHash,
             fileSecurity: { reader: attributeReader(), signatureEnforcement: { status: 'undetermined',
-                reason: 'No validated same-firmware verifier; metadata alone does not establish enforcement' } },
+                reason: 'Offline kernel shows a UEP rejection path; live cause remains unconfirmed' } },
             restrictions: restrictions(), native: nativeResult, executables: {}, paths: {} };
         ['/', '/bin', '/bin/true', '/bin/uname', '/proc', '/proc/self', '/proc/self/status', '/tmp'].forEach(function (path) {
             report.paths[path] = inspectPath(path);
@@ -197,7 +201,7 @@
                 return finish({ status: 'skipped', reason: 'Not ARM Linux' });
             }
             var reader = attributeReader();
-            if (!reader.selected) return finish({ status: 'skipped', reason: 'No permitted installed getfattr reader' });
+            if (!reader.selected) return finish({ status: 'skipped', reason: 'Reviewed installed chsmack unavailable' });
             var abi = systemABI();
             if (!abi.elf ||
                 abi.bits !== 32 || !abi.littleEndian || abi.machine !== 40 || abi.eabi !== 5) {
@@ -284,7 +288,7 @@
         } catch (e) { busy = false; send(res, 500, { error: errorCode(e) }, true); }
     });
     server.timeout = 12000;
-    server.on('error', function () { console.error('Diagnostics 1.4 loopback listener unavailable'); });
+    server.on('error', function () { console.error('Diagnostics 1.5 loopback listener unavailable'); });
     server.listen(port, '127.0.0.1');
     setTimeout(function () { expired = true; stopLAN(); server.close(); }, 600000);
 }());

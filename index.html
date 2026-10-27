@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Read-only Diagnostics 1.4</title>
+<title>Read-only Diagnostics 1.5</title>
 <style>
 * { box-sizing: border-box; } html, body { width:100%; height:100%; overflow:hidden; }
 body { margin:0; padding:4vh 4vw; background:#101820; color:#fff; font:3vh sans-serif; }
@@ -11,13 +11,13 @@ button:focus { outline:0.5vh solid #ffdc60; }
 #url { display:block; font:2.6vh monospace; overflow-wrap:break-word; word-wrap:break-word; color:#ffdc60; min-height:9vh; }
 #status { height:6vh; } .hint { font-size:2.5vh; color:#b8cbd8; }
 </style></head><body>
-<h1>Read-only Diagnostics 1.4.0</h1>
+<h1>Read-only Diagnostics 1.5.0</h1>
 <p>Left/Right selects · Enter runs · Return goes back</p>
-<div><button id="baseline">1. Read baseline</button><button id="native">2. Inspect file labels</button><button id="share">3. Share to Mac</button><button id="stop">Stop sharing</button><button id="back">Back</button></div>
+<div><button id="baseline">1. Read baseline</button><button id="native">2. Compare labels</button><button id="share">3. Share to Mac</button><button id="stop">Stop sharing</button><button id="back">Back</button></div>
 <div id="summary" aria-live="polite">Connecting to diagnostic service…</div>
 <p id="status" aria-live="polite"></p>
 <code id="url"></code>
-<p class="hint">Label inspection uses an installed reader only; no custom execution or security changes.<br>LAN sharing: trusted home network only; plain HTTP; secret URL expires after 5 minutes.<br>Service expires 10 minutes after launch. No root or firmware changes.</p>
+<p class="hint">Label comparison uses reviewed chsmack display mode; the custom probe is not executed.<br>LAN sharing: trusted home network only; plain HTTP; secret URL expires after 5 minutes.<br>Service expires 10 minutes after launch. No root or firmware changes.</p>
 <script>
 (function () {
     'use strict';
@@ -26,6 +26,10 @@ button:focus { outline:0.5vh solid #ffdc60; }
     function show(s) {
         key = s.control;
         var r = s.report;
+        if (r && r.diagnosticVersion !== '1.5.0') {
+            key = ''; summary.textContent = 'Older diagnostic service detected. Restart TV normally, then reopen v1.5.';
+            status.textContent = 'Report version: ' + r.diagnosticVersion; url.textContent = ''; return;
+        }
         summary.textContent = r ? 'Node ' + r.node + ' · ' + r.architecture + ' · ' + r.platform + ' ' + r.kernelRelease + '\nUID ' + r.uid + ' / GID ' + r.gid + ' · ELF EABI ' + (r.systemELF.eabi || '?') + '\nSystem true: ' + r.executables.true.status + ' · uname: ' + r.executables.uname.status + '\nData mount noexec: ' + (typeof r.restrictions.appDataMount.noexec === 'boolean' ? r.restrictions.appDataMount.noexec : 'unknown') + ' · Labels: ' + r.fileSecurity.reader.status + ' / ' + r.native.status + (r.native.error ? ' · ' + r.native.error : '') + (r.native.cleanup && r.native.cleanup.error ? ' · cleanup failed' : '') : 'Ready. Select 1. Read baseline first.';
         status.textContent = 'LAN: ' + s.lanState;
         url.textContent = s.lanURL || 'Full report URL appears here when sharing is enabled.';
