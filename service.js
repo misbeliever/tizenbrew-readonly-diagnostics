@@ -104,8 +104,57 @@
             systemTrue: permissions('/bin/true')
         };
     }
+    function attributeReader() {
+        var candidates = ['/usr/bin/getfattr', '/bin/getfattr'], checks = [], selected = null;
+        candidates.forEach(function (path) {
+            var check = observe(function () {
+                var st = fs.statSync(path);
+                if (!st.isFile() || st.uid !== 0 || (st.mode & 18) !== 0) return 'rejected ownership/type/mode';
+                fs.accessSync(path, fs.X_OK);
+                if (!selected) selected = path;
+                return 'available';
+            });
+            checks.push({ path: path, result: check });
+        });
+        return { status: selected ? 'available' : 'unavailable', selected: selected, checks: checks };
+    }
+    function fileAttributes(reader, target, done) {
+        if (!reader.selected) return done({ status: 'unavailable', reason: 'No permitted installed getfattr reader' });
+        var names = ['security.SMACK64', 'security.SMACK64EXEC', 'security.SMACK64MMAP', 'security.ima', 'security.evm'];
+        var result = { reader: reader.selected, attributes: {} }, index = 0;
+        function next() {
+            if (index === names.length) return done(result);
+            var name = names[index++];
+            try {
+                cp.execFile(reader.selected, ['--absolute-names', '--only-values', '-n', name, '--', target], {
+                    timeout: 1000, killSignal: 'SIGKILL', maxBuffer: 4096,
+                    encoding: 'binary', env: { LANG: 'C', LC_ALL: 'C' }
+                }, function (e, stdout) {
+                    if (e) {
+                        result.attributes[name] = { status: 'unavailable', code: e.code === undefined ? null : e.code,
+                            signal: e.signal || null, killed: !!e.killed };
+                    } else {
+                        var value = new Buffer(stdout || '', 'binary');
+                        if (name.indexOf('security.SMACK') === 0) {
+                            var text = value.toString('utf8');
+                            result.attributes[name] = value.length <= 256 && /^[\x20-\x7e]*$/.test(text) ?
+                                { status: 'read', value: text } : { status: 'unavailable', reason: 'Unexpected label encoding/length' };
+                        } else {
+                            result.attributes[name] = { status: 'read', bytes: value.length,
+                                sha256: crypto.createHash('sha256').update(value).digest('hex') };
+                        }
+                    }
+                    next();
+                });
+            } catch (e) {
+                result.attributes[name] = { status: 'unavailable', error: errorCode(e) };
+                next();
+            }
+        }
+        next();
+    }
     function collect(done) {
-        report = { diagnosticVersion: '1.3.0', capturedAt: new Date().toISOString(),
+        report = { diagnosticVersion: '1.4.0', capturedAt: new Date().toISOString(),
             node: process.version, v8: process.versions.v8, architecture: process.arch,
             platform: process.platform, osType: os.type(), kernelRelease: os.release(),
             uptimeSeconds: Math.floor(os.uptime()),
@@ -117,12 +166,16 @@
             freeMemoryBytes: os.freemem(), totalMemoryBytes: os.totalmem(),
             tizenPlatform: observe(function () { return tizen.systeminfo.getCapability('http://tizen.org/feature/platform.version'); }),
             systemELF: observe(systemABI), probeELF: elf(binary), probeSHA256: binaryHash,
+            fileSecurity: { reader: attributeReader(), signatureEnforcement: { status: 'undetermined',
+                reason: 'No validated same-firmware verifier; metadata alone does not establish enforcement' } },
             restrictions: restrictions(), native: nativeResult, executables: {}, paths: {} };
         ['/', '/bin', '/bin/true', '/bin/uname', '/proc', '/proc/self', '/proc/self/status', '/tmp'].forEach(function (path) {
             report.paths[path] = inspectPath(path);
         });
         probe('/bin/true', [], function (r) { report.executables.true = r;
-            probe('/bin/uname', ['-s', '-r', '-m'], function (r) { report.executables.uname = r; done(); });
+            probe('/bin/uname', ['-s', '-r', '-m'], function (r) { report.executables.uname = r;
+                fileAttributes(report.fileSecurity.reader, '/bin/true', function (attrs) { report.fileSecurity.systemTrue = attrs; done(); });
+            });
         });
     }
     function inspectNative(done) {
@@ -143,6 +196,8 @@
             if (process.platform !== 'linux' || process.arch !== 'arm') {
                 return finish({ status: 'skipped', reason: 'Not ARM Linux' });
             }
+            var reader = attributeReader();
+            if (!reader.selected) return finish({ status: 'skipped', reason: 'No permitted installed getfattr reader' });
             var abi = systemABI();
             if (!abi.elf ||
                 abi.bits !== 32 || !abi.littleEndian || abi.machine !== 40 || abi.eabi !== 5) {
@@ -163,10 +218,11 @@
             file = dir + '/probe-armv7';
             fs.writeFileSync(file, binary, { flag: 'wx', mode: 448 });
             if (crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex') !== binaryHash) throw new Error('written integrity');
-            finish({ status: 'inspected', executionAttempted: false,
+            var inspection = { status: 'inspected', executionAttempted: false,
                 capturedAt: new Date().toISOString(),
                 directory: permissions(dir), file: permissions(file),
-                fileMount: observe(function () { return mountFor(boundedText('/proc/self/mountinfo', 262144), file); }) });
+                fileMount: observe(function () { return mountFor(boundedText('/proc/self/mountinfo', 262144), file); }) };
+            fileAttributes(reader, file, function (attrs) { inspection.fileSecurity = attrs; finish(inspection); });
         } catch (e) { finish({ status: 'failed', error: errorCode(e) }); }
     }
     function send(res, code, body, cors) {
@@ -227,8 +283,8 @@
             else { stopLAN(); done(); }
         } catch (e) { busy = false; send(res, 500, { error: errorCode(e) }, true); }
     });
-    server.timeout = 5000;
-    server.on('error', function () { console.error('Diagnostics 1.3 loopback listener unavailable'); });
+    server.timeout = 12000;
+    server.on('error', function () { console.error('Diagnostics 1.4 loopback listener unavailable'); });
     server.listen(port, '127.0.0.1');
     setTimeout(function () { expired = true; stopLAN(); server.close(); }, 600000);
 }());
